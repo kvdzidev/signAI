@@ -1,5 +1,4 @@
 import os
-import time
 import sqlite3
 import cv2
 import numpy as np
@@ -16,8 +15,7 @@ MODEL_PATH = "traffic_sign_yolo.pt"
 CONF_TH = 0.35
 IOU_TH = 0.45
 SPEAK_RATE = 155
-SPEAK_COOLDOWN_SEC = 2.0
-MAX_SPEAK_PER_FRAME = 2
+MIN_AREA = 900
 
 def speak_init():
     engine = pyttsx3.init()
@@ -85,44 +83,116 @@ def db_upsert_alias(alias, code):
     con.commit()
     con.close()
 
-def db_seed_minimal():
-    db_upsert_sign("STOP", "STOP", "Zakaz / Obowiązek zatrzymania", "Znak STOP. Zatrzymaj się bezwzględnie.", 10)
-    db_upsert_sign("A-7", "Ustąp pierwszeństwa", "Ostrzegawczy", "Ustąp pierwszeństwa przejazdu.", 9)
-    db_upsert_sign("B-20", "STOP", "Zakazu", "Zatrzymanie obowiązkowe.", 10)
-    db_upsert_sign("B-33", "Ograniczenie prędkości", "Zakazu", "Nie przekraczaj wskazanej prędkości.", 7)
-    db_upsert_sign("B-36", "Zakaz zatrzymywania się", "Zakazu", "Zakaz zatrzymywania się.", 6)
-    db_upsert_sign("B-35", "Zakaz postoju", "Zakazu", "Zakaz postoju.", 6)
-    db_upsert_sign("C-2", "Nakaz jazdy w prawo", "Nakazu", "Nakaz jazdy w prawo za znakiem.", 5)
-    db_upsert_sign("C-4", "Nakaz jazdy w lewo", "Nakazu", "Nakaz jazdy w lewo za znakiem.", 5)
-    db_upsert_sign("D-1", "Droga z pierwszeństwem", "Informacyjny", "Masz pierwszeństwo na tej drodze.", 5)
-    db_upsert_sign("D-2", "Koniec drogi z pierwszeństwem", "Informacyjny", "Koniec drogi z pierwszeństwem.", 4)
-    db_upsert_sign("A-1", "Niebezpieczny zakręt w prawo", "Ostrzegawczy", "Uwaga na niebezpieczny zakręt w prawo.", 4)
-    db_upsert_sign("A-2", "Niebezpieczny zakręt w lewo", "Ostrzegawczy", "Uwaga na niebezpieczny zakręt w lewo.", 4)
-    db_upsert_sign("A-3", "Niebezpieczne zakręty", "Ostrzegawczy", "Uwaga na serię niebezpiecznych zakrętów.", 4)
-    db_upsert_sign("A-6a", "Przejazd kolejowy z zaporami", "Ostrzegawczy", "Uwaga na przejazd kolejowy z zaporami.", 6)
-    db_upsert_sign("A-6b", "Przejazd kolejowy bez zapór", "Ostrzegawczy", "Uwaga na przejazd kolejowy bez zapór.", 6)
-    db_upsert_sign("A-16", "Przejście dla pieszych", "Ostrzegawczy", "Uwaga, przejście dla pieszych.", 5)
-    db_upsert_sign("D-6", "Przejście dla pieszych", "Informacyjny", "Przejście dla pieszych.", 5)
-    db_upsert_sign("D-6a", "Przejazd dla rowerzystów", "Informacyjny", "Przejazd dla rowerzystów.", 4)
-    db_upsert_sign("C-13", "Droga dla rowerów", "Nakazu", "Droga przeznaczona dla rowerów.", 3)
-    db_upsert_sign("B-2", "Zakaz wjazdu", "Zakazu", "Zakaz wjazdu.", 8)
+def seed_signs():
+    def add(code, name, cat, desc, pr=0, aliases=None):
+        db_upsert_sign(code, name, cat, desc, pr)
+        db_upsert_alias(code.lower(), code)
+        db_upsert_alias(name.lower(), code)
+        if aliases:
+            for a in aliases:
+                db_upsert_alias(str(a).strip().lower(), code)
 
-    db_upsert_alias("stop", "STOP")
-    db_upsert_alias("a-7", "A-7")
-    db_upsert_alias("yield", "A-7")
-    db_upsert_alias("speed limit", "B-33")
-    db_upsert_alias("speed_limit", "B-33")
-    db_upsert_alias("no entry", "B-2")
-    db_upsert_alias("no_entry", "B-2")
-    db_upsert_alias("crosswalk", "D-6")
-    db_upsert_alias("pedestrian crossing", "D-6")
-    db_upsert_alias("priority road", "D-1")
-    db_upsert_alias("end of priority road", "D-2")
+    add("B-20", "STOP", "Zakazu", "Zatrzymanie obowiązkowe.", 10, ["stop"])
+    add("A-7", "Ustąp pierwszeństwa", "Ostrzegawczy", "Ustąp pierwszeństwa przejazdu.", 9, ["ustap", "yield", "give way"])
+    add("D-1", "Droga z pierwszeństwem", "Informacyjny", "Masz pierwszeństwo na tej drodze.", 6, ["priority road"])
+    add("D-2", "Koniec drogi z pierwszeństwem", "Informacyjny", "Koniec drogi z pierwszeństwem.", 5, ["end priority road"])
+
+    add("B-33", "Ograniczenie prędkości", "Zakazu", "Nie przekraczaj wskazanej prędkości.", 8, ["speed limit", "limit"])
+    add("B-34", "Koniec ograniczenia prędkości", "Zakazu", "Koniec ograniczenia prędkości.", 6, ["end speed limit"])
+    add("B-35", "Zakaz postoju", "Zakazu", "Zakaz postoju.", 6, ["no parking"])
+    add("B-36", "Zakaz zatrzymywania się", "Zakazu", "Zakaz zatrzymywania się.", 7, ["no stopping"])
+    add("B-1", "Zakaz ruchu w obu kierunkach", "Zakazu", "Zakaz ruchu w obu kierunkach.", 8, ["no vehicles"])
+    add("B-2", "Zakaz wjazdu", "Zakazu", "Zakaz wjazdu.", 9, ["no entry"])
+    add("B-3", "Zakaz wjazdu pojazdów silnikowych", "Zakazu", "Zakaz wjazdu pojazdów silnikowych.", 7, ["no motor vehicles"])
+    add("B-9", "Zakaz wjazdu rowerów", "Zakazu", "Zakaz wjazdu rowerów.", 5, ["no bicycles"])
+    add("B-10", "Zakaz wjazdu motorowerów", "Zakazu", "Zakaz wjazdu motorowerów.", 4)
+    add("B-11", "Zakaz wjazdu wózków rowerowych", "Zakazu", "Zakaz wjazdu wózków rowerowych.", 3)
+    add("B-12", "Zakaz wjazdu wózków ręcznych", "Zakazu", "Zakaz wjazdu wózków ręcznych.", 3)
+    add("B-13", "Zakaz wjazdu pojazdów z materiałami niebezpiecznymi", "Zakazu", "Zakaz wjazdu pojazdów przewożących materiały niebezpieczne.", 5)
+    add("B-14", "Zakaz wjazdu pojazdów z ładunkiem mogącym zanieczyścić wodę", "Zakazu", "Zakaz wjazdu pojazdów z ładunkiem mogącym zanieczyścić wodę.", 3)
+    add("B-15", "Zakaz wjazdu pojazdów o szerokości ponad ... m", "Zakazu", "Zakaz wjazdu pojazdów powyżej dopuszczalnej szerokości.", 4, ["max width"])
+    add("B-16", "Zakaz wjazdu pojazdów o wysokości ponad ... m", "Zakazu", "Zakaz wjazdu pojazdów powyżej dopuszczalnej wysokości.", 4, ["max height"])
+    add("B-17", "Zakaz wjazdu pojazdów o długości ponad ... m", "Zakazu", "Zakaz wjazdu pojazdów powyżej dopuszczalnej długości.", 4, ["max length"])
+    add("B-18", "Zakaz wjazdu pojazdów o masie całkowitej ponad ... t", "Zakazu", "Zakaz wjazdu pojazdów powyżej dopuszczalnej masy całkowitej.", 4, ["max weight"])
+    add("B-19", "Zakaz wjazdu pojazdów o nacisku osi większym niż ... t", "Zakazu", "Zakaz wjazdu pojazdów o zbyt dużym nacisku osi.", 4, ["axle load"])
+    add("B-21", "Zakaz skrętu w lewo", "Zakazu", "Zakaz skrętu w lewo.", 5, ["no left turn"])
+    add("B-22", "Zakaz skrętu w prawo", "Zakazu", "Zakaz skrętu w prawo.", 5, ["no right turn"])
+    add("B-23", "Zakaz zawracania", "Zakazu", "Zakaz zawracania.", 5, ["no u-turn"])
+    add("B-24", "Koniec zakazu wyprzedzania", "Zakazu", "Koniec zakazu wyprzedzania.", 4, ["end no overtaking"])
+    add("B-25", "Zakaz wyprzedzania", "Zakazu", "Zakaz wyprzedzania.", 5, ["no overtaking"])
+    add("B-26", "Zakaz wyprzedzania przez samochody ciężarowe", "Zakazu", "Zakaz wyprzedzania przez samochody ciężarowe.", 4)
+    add("B-27", "Koniec zakazu wyprzedzania przez samochody ciężarowe", "Zakazu", "Koniec zakazu wyprzedzania przez samochody ciężarowe.", 3)
+    add("B-28", "Koniec zakazu używania sygnałów dźwiękowych", "Zakazu", "Koniec zakazu używania sygnałów dźwiękowych.", 2)
+    add("B-29", "Zakaz używania sygnałów dźwiękowych", "Zakazu", "Zakaz używania sygnałów dźwiękowych.", 3, ["no horn"])
+    add("B-31", "Pierwszeństwo nadjeżdżających z przeciwka", "Zakazu", "Masz pierwszeństwo na zwężonym odcinku.", 6)
+    add("B-32", "Pierwszeństwo dla nadjeżdżających z przeciwka", "Zakazu", "Ustąp pierwszeństwa na zwężonym odcinku.", 6)
+
+    add("C-1", "Nakaz jazdy w prawo", "Nakazu", "Nakaz jazdy w prawo.", 5)
+    add("C-2", "Nakaz jazdy w prawo za znakiem", "Nakazu", "Nakaz ominięcia przeszkody z prawej strony.", 5)
+    add("C-3", "Nakaz jazdy w lewo", "Nakazu", "Nakaz jazdy w lewo.", 5)
+    add("C-4", "Nakaz jazdy w lewo za znakiem", "Nakazu", "Nakaz ominięcia przeszkody z lewej strony.", 5)
+    add("C-5", "Nakaz jazdy prosto", "Nakazu", "Nakaz jazdy prosto.", 5)
+    add("C-6", "Nakaz jazdy prosto lub w prawo", "Nakazu", "Nakaz jazdy prosto lub w prawo.", 4)
+    add("C-7", "Nakaz jazdy prosto lub w lewo", "Nakazu", "Nakaz jazdy prosto lub w lewo.", 4)
+    add("C-8", "Nakaz jazdy w prawo lub w lewo", "Nakazu", "Nakaz jazdy w prawo lub w lewo.", 4)
+    add("C-9", "Nakaz jazdy z prawej strony znaku", "Nakazu", "Nakaz omijania znaku z prawej strony.", 3)
+    add("C-10", "Nakaz jazdy z lewej strony znaku", "Nakazu", "Nakaz omijania znaku z lewej strony.", 3)
+    add("C-11", "Nakaz używania łańcuchów przeciwpoślizgowych", "Nakazu", "Wymagane łańcuchy przeciwpoślizgowe.", 2)
+    add("C-12", "Ruch okrężny", "Nakazu", "Obowiązuje ruch okrężny.", 5, ["roundabout"])
+    add("C-13", "Droga dla rowerów", "Nakazu", "Droga przeznaczona dla rowerów.", 4, ["bike lane"])
+    add("C-13a", "Koniec drogi dla rowerów", "Nakazu", "Koniec drogi dla rowerów.", 3)
+    add("C-14", "Prędkość minimalna", "Nakazu", "Nie jedź wolniej niż wskazuje znak.", 3, ["min speed"])
+    add("C-15", "Koniec prędkości minimalnej", "Nakazu", "Koniec minimalnej prędkości.", 2)
+
+    add("A-1", "Niebezpieczny zakręt w prawo", "Ostrzegawczy", "Uwaga na niebezpieczny zakręt w prawo.", 3)
+    add("A-2", "Niebezpieczny zakręt w lewo", "Ostrzegawczy", "Uwaga na niebezpieczny zakręt w lewo.", 3)
+    add("A-3", "Niebezpieczne zakręty", "Ostrzegawczy", "Uwaga na serię niebezpiecznych zakrętów.", 3)
+    add("A-4", "Niebezpieczny zjazd", "Ostrzegawczy", "Uwaga na niebezpieczny zjazd.", 2)
+    add("A-5", "Niebezpieczne wzniesienie", "Ostrzegawczy", "Uwaga na niebezpieczne wzniesienie.", 2)
+    add("A-6a", "Przejazd kolejowy z zaporami", "Ostrzegawczy", "Uwaga na przejazd kolejowy z zaporami.", 5)
+    add("A-6b", "Przejazd kolejowy bez zapór", "Ostrzegawczy", "Uwaga na przejazd kolejowy bez zapór.", 5)
+    add("A-6c", "Tramwaj", "Ostrzegawczy", "Uwaga na przejazd tramwaju.", 3)
+    add("A-7", "Ustąp pierwszeństwa", "Ostrzegawczy", "Ustąp pierwszeństwa przejazdu.", 9)
+    add("A-8", "Skrzyżowanie o ruchu okrężnym", "Ostrzegawczy", "Uwaga na rondo.", 3)
+    add("A-9", "Przejazd kolejowy bez zapór", "Ostrzegawczy", "Uwaga na przejazd kolejowy.", 4)
+    add("A-10", "Nierówna droga", "Ostrzegawczy", "Uwaga na nierówności.", 2)
+    add("A-11", "Próg zwalniający", "Ostrzegawczy", "Uwaga na próg zwalniający.", 3, ["speed bump"])
+    add("A-12a", "Zwężenie jezdni", "Ostrzegawczy", "Uwaga na zwężenie jezdni.", 3)
+    add("A-12b", "Zwężenie jezdni - prawostronne", "Ostrzegawczy", "Uwaga na zwężenie z prawej strony.", 3)
+    add("A-12c", "Zwężenie jezdni - lewostronne", "Ostrzegawczy", "Uwaga na zwężenie z lewej strony.", 3)
+    add("A-13", "Ruch dwukierunkowy", "Ostrzegawczy", "Uwaga, ruch dwukierunkowy.", 3)
+    add("A-14", "Roboty na drodze", "Ostrzegawczy", "Uwaga, roboty drogowe.", 3, ["road works"])
+    add("A-15", "Śliska jezdnia", "Ostrzegawczy", "Uwaga, śliska jezdnia.", 3, ["slippery road"])
+    add("A-16", "Przejście dla pieszych", "Ostrzegawczy", "Uwaga, przejście dla pieszych.", 5, ["pedestrian crossing"])
+    add("A-17", "Dzieci", "Ostrzegawczy", "Uwaga, dzieci.", 4, ["children"])
+    add("A-18a", "Zwierzęta gospodarskie", "Ostrzegawczy", "Uwaga, zwierzęta gospodarskie.", 2)
+    add("A-18b", "Dzikie zwierzęta", "Ostrzegawczy", "Uwaga, dzikie zwierzęta.", 2)
+    add("A-19", "Boczny wiatr", "Ostrzegawczy", "Uwaga na boczny wiatr.", 2)
+    add("A-20", "Odcinek jezdni o ruchu wahadłowym", "Ostrzegawczy", "Możliwy ruch wahadłowy.", 2)
+    add("A-21", "Tramwaj", "Ostrzegawczy", "Uwaga na tramwaj.", 2)
+    add("A-22", "Niebezpieczny spadek", "Ostrzegawczy", "Uwaga na spadek.", 2)
+
+    add("D-6", "Przejście dla pieszych", "Informacyjny", "Przejście dla pieszych.", 5, ["crosswalk"])
+    add("D-6a", "Przejazd dla rowerzystów", "Informacyjny", "Przejazd dla rowerzystów.", 4, ["bike crossing"])
+    add("D-6b", "Przejście dla pieszych i przejazd dla rowerzystów", "Informacyjny", "Przejście i przejazd rowerowy.", 4)
+    add("D-7", "Droga ekspresowa", "Informacyjny", "Wjazd na drogę ekspresową.", 3)
+    add("D-8", "Koniec drogi ekspresowej", "Informacyjny", "Koniec drogi ekspresowej.", 2)
+    add("D-9", "Autostrada", "Informacyjny", "Wjazd na autostradę.", 3)
+    add("D-10", "Koniec autostrady", "Informacyjny", "Koniec autostrady.", 2)
+    add("D-11", "Początek pasa ruchu dla autobusów", "Informacyjny", "Początek buspasa.", 2, ["bus lane"])
+    add("D-12", "Koniec pasa ruchu dla autobusów", "Informacyjny", "Koniec buspasa.", 2)
+    add("D-18", "Parking", "Informacyjny", "Parking.", 2, ["parking"])
+    add("D-18a", "Parking zadaszony", "Informacyjny", "Parking zadaszony.", 1)
+    add("D-23", "Stacja paliw", "Informacyjny", "Stacja paliw.", 1, ["gas station", "fuel"])
+    add("D-24", "Telefon", "Informacyjny", "Telefon.", 1)
+    add("D-25", "Punkt informacji turystycznej", "Informacyjny", "Informacja turystyczna.", 1)
+    add("D-26", "Punkt pierwszej pomocy", "Informacyjny", "Punkt pierwszej pomocy.", 2, ["first aid"])
+    add("D-34", "Punkt kontroli drogowej", "Informacyjny", "Możliwa kontrola drogowa.", 1)
 
 def db_lookup(label):
     if not label:
         return None
-    key = label.strip().lower()
+    key = str(label).strip().lower()
     con = db_connect()
     cur = con.cursor()
     cur.execute("""
@@ -146,25 +216,15 @@ def db_lookup(label):
         return None
     return {"code": row[0], "name": row[1], "category": row[2], "desc": row[3], "priority": int(row[4] or 0)}
 
-def norm_label(s):
-    if s is None:
-        return ""
-    s = str(s).strip()
-    s = s.replace("—", "-").replace("–", "-").replace("_", " ")
-    return " ".join(s.split())
-
-def put_label(img, text, x, y, w, h):
-    text = norm_label(text)
-    if not text:
-        return
+def put_label(img, text, x, y):
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.7
     thickness = 2
     (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
     px = max(0, x)
-    py = max(0, y - 10)
-    cv2.rectangle(img, (px, py - th - 8), (px + tw + 10, py + 2), (0, 0, 0), -1)
-    cv2.putText(img, text, (px + 5, py - 5), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    py = max(0, y - 8)
+    cv2.rectangle(img, (px, py - th - 10), (px + tw + 12, py + 4), (0, 0, 0), -1)
+    cv2.putText(img, text, (px + 6, py - 4), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
 def hsv_masks(hsv):
     lower_red1 = np.array([0, 70, 50])
@@ -181,41 +241,35 @@ def hsv_masks(hsv):
     upper_yellow = np.array([40, 255, 255])
     yellow = cv2.inRange(hsv, lower_yellow, upper_yellow)
 
-    lower_white = np.array([0, 0, 200])
-    upper_white = np.array([180, 60, 255])
-    white = cv2.inRange(hsv, lower_white, upper_white)
-
-    return red, blue, yellow, white
+    return red, blue, yellow
 
 def classify_shape(cnt):
     area = cv2.contourArea(cnt)
-    if area < 1200:
+    if area < MIN_AREA:
         return None
     peri = cv2.arcLength(cnt, True)
     if peri <= 0:
         return None
-    epsilon = 0.03 * peri
-    approx = cv2.approxPolyDP(cnt, epsilon, True)
+    approx = cv2.approxPolyDP(cnt, 0.03 * peri, True)
     corners = len(approx)
     x, y, w, h = cv2.boundingRect(approx)
     ar = (w / h) if h else 0
     if corners == 8:
-        return {"label": "stop", "bbox": (x, y, w, h), "approx": approx, "score": 0.55}
+        return ("stop", (x, y, x + w, y + h), 0.55)
     if corners == 3:
-        return {"label": "a-7", "bbox": (x, y, w, h), "approx": approx, "score": 0.45}
+        return ("a-7", (x, y, x + w, y + h), 0.45)
     if corners >= 9 and 0.75 <= ar <= 1.25:
-        return {"label": "speed limit", "bbox": (x, y, w, h), "approx": approx, "score": 0.35}
+        return ("speed limit", (x, y, x + w, y + h), 0.35)
     if corners == 4 and 0.75 <= ar <= 1.35:
-        return {"label": "informacyjny", "bbox": (x, y, w, h), "approx": approx, "score": 0.25}
+        return ("informacyjny", (x, y, x + w, y + h), 0.25)
     return None
 
-def detect_fallback(frame):
-    out = []
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    red, blue, yellow, white = hsv_masks(hsv)
+def detect_fallback(img):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    red, blue, yellow = hsv_masks(hsv)
     kernel = np.ones((5, 5), np.uint8)
-    masks = [("red", red), ("blue", blue), ("yellow", yellow)]
-    for name, m in masks:
+    out = []
+    for m in (red, blue, yellow):
         m = cv2.morphologyEx(m, cv2.MORPH_OPEN, kernel, iterations=1)
         m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, kernel, iterations=2)
         contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -223,14 +277,22 @@ def detect_fallback(frame):
             r = classify_shape(cnt)
             if not r:
                 continue
-            x, y, w, h = r["bbox"]
-            if w < 25 or h < 25:
-                continue
-            out.append({"label": r["label"], "conf": float(r["score"]), "bbox": (x, y, x + w, y + h)})
+            label, bbox, conf = r
+            out.append({"label": label, "conf": float(conf), "bbox": bbox})
     return out
 
-def detect_yolo(model, frame):
-    preds = model.predict(frame, conf=CONF_TH, iou=IOU_TH, verbose=False)
+def load_model_or_none():
+    if not YOLO_AVAILABLE:
+        return None
+    if os.path.exists(MODEL_PATH):
+        try:
+            return YOLO(MODEL_PATH)
+        except Exception:
+            return None
+    return None
+
+def detect_yolo(model, img):
+    preds = model.predict(img, conf=CONF_TH, iou=IOU_TH, verbose=False)
     r = []
     if not preds:
         return r
@@ -248,12 +310,12 @@ def detect_yolo(model, frame):
             label = names[k]
         elif isinstance(names, (list, tuple)) and 0 <= k < len(names):
             label = names[k]
-        r.append({"label": norm_label(label), "conf": float(c), "bbox": (int(x1), int(y1), int(x2), int(y2))})
+        r.append({"label": str(label).strip(), "conf": float(c), "bbox": (int(x1), int(y1), int(x2), int(y2))})
     return r
 
-def best_messages(detections):
+def enrich(dets):
     enriched = []
-    for d in detections:
+    for d in dets:
         info = db_lookup(d["label"])
         if info is None:
             info = {"code": d["label"], "name": d["label"], "category": None, "desc": None, "priority": 0}
@@ -261,131 +323,56 @@ def best_messages(detections):
     enriched.sort(key=lambda x: (x.get("priority", 0), x.get("conf", 0.0)), reverse=True)
     return enriched
 
-def draw_detections(frame, enriched):
-    out = frame.copy()
+def draw(img, enriched):
+    out = img.copy()
     for d in enriched:
         x1, y1, x2, y2 = d["bbox"]
         cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
         label = f'{d["name"]} ({d["conf"]:.2f})'
-        put_label(out, label, x1, y1, x2 - x1, y2 - y1)
+        put_label(out, label, x1, y1)
     return out
 
-def should_speak(now, last_time):
-    return (now - last_time) >= SPEAK_COOLDOWN_SEC
+def main():
+    db_init()
+    seed_signs()
+    engine = speak_init()
+    model = load_model_or_none()
 
-def build_speech_queue(enriched):
-    q = []
-    used = set()
-    for d in enriched:
-        msg = d.get("desc") or d.get("name") or ""
-        msg = norm_label(msg)
-        if not msg:
-            continue
-        k = msg.lower()
-        if k in used:
-            continue
-        used.add(k)
-        q.append(msg)
-        if len(q) >= MAX_SPEAK_PER_FRAME:
-            break
-    return q
+    image_path = "znak.png"
+    import sys
+    if len(sys.argv) > 1:
+        image_path = sys.argv[1]
 
-def run_on_image(path, model, engine):
-    img = cv2.imread(path)
+    img = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if img is None:
-        print(f"BŁĄD: Nie widzę pliku '{path}'.")
+        print(f"BŁĄD: Nie widzę pliku '{image_path}'.")
         return
+
     if model is not None:
-        det = detect_yolo(model, img)
+        dets = detect_yolo(model, img)
     else:
-        det = detect_fallback(img)
-    enriched = best_messages(det)
-    out = draw_detections(img, enriched)
+        dets = detect_fallback(img)
+
+    enriched = enrich(dets)
+    out = draw(img, enriched)
+
     if enriched:
         print("\n" + "#" * 40)
-        for d in enriched[:8]:
+        for d in enriched[:12]:
             print(f'WYKRYTO: {d["name"]} | pewność: {d["conf"]:.2f} | kod: {d["code"]}')
             if d.get("desc"):
                 print(f'OPIS: {d["desc"]}')
         print("#" * 40 + "\n")
-        queue = build_speech_queue(enriched)
-        for t in queue:
-            speak(engine, t)
+        top = enriched[0]
+        msg = top.get("desc") or top.get("name") or ""
+        if msg:
+            speak(engine, msg)
     else:
         print("Nie wykryto znaku.")
+
     cv2.imshow("SignAI", out)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
-
-def run_on_video(source, model, engine):
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        print("BŁĄD: Nie mogę otworzyć źródła wideo.")
-        return
-    last_spoken = 0.0
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        if model is not None:
-            det = detect_yolo(model, frame)
-        else:
-            det = detect_fallback(frame)
-        enriched = best_messages(det)
-        out = draw_detections(frame, enriched)
-        now = time.time()
-        if enriched and should_speak(now, last_spoken):
-            queue = build_speech_queue(enriched)
-            if queue:
-                speak(engine, queue[0])
-                last_spoken = now
-        cv2.imshow("SignAI", out)
-        k = cv2.waitKey(1) & 0xFF
-        if k == 27 or k == ord("q"):
-            break
-    cap.release()
-    cv2.destroyAllWindows()
-
-def load_model_or_none():
-    if not YOLO_AVAILABLE:
-        return None
-    if os.path.exists(MODEL_PATH):
-        try:
-            return YOLO(MODEL_PATH)
-        except Exception:
-            return None
-    return None
-
-def main():
-    db_init()
-    db_seed_minimal()
-    engine = speak_init()
-    model = load_model_or_none()
-
-    print("SignAI uruchomione.")
-    print("Tryby:")
-    print("1) obraz:  python signai.py image znak.jpg")
-    print("2) kamera: python signai.py cam")
-    print("3) wideo:  python signai.py video film.mp4")
-    print(f"Model YOLO: {'TAK' if model is not None else 'NIE (fallback OpenCV)'}")
-    import sys
-    args = sys.argv[1:]
-    if not args:
-        run_on_image("znak.jpg", model, engine)
-        return
-    mode = args[0].lower()
-    if mode == "image":
-        path = args[1] if len(args) > 1 else "znak.jpg"
-        run_on_image(path, model, engine)
-        return
-    if mode == "cam":
-        run_on_video(0, model, engine)
-        return
-    if mode == "video":
-        path = args[1] if len(args) > 1 else "film.mp4"
-        run_on_video(path, model, engine)
-        return
-    run_on_image(args[0], model, engine)
 
 if __name__ == "__main__":
     main()

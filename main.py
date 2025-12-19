@@ -1,3 +1,4 @@
+import argparse
 import os
 import sqlite3
 import cv2
@@ -16,6 +17,22 @@ CONF_TH = 0.35
 IOU_TH = 0.45
 SPEAK_RATE = 155
 MIN_AREA = 900
+MIN_CONF_DEFAULT = 0.4
+
+LANG_STRINGS = {
+    "pl": {
+        "detected": "WYKRYTO",
+        "desc": "OPIS",
+        "none": "Nie wykryto znaku.",
+        "app_desc": "SignAI - wykrywanie znaków drogowych.",
+    },
+    "en": {
+        "detected": "DETECTED",
+        "desc": "DESCRIPTION",
+        "none": "No sign detected.",
+        "app_desc": "SignAI - traffic sign detection.",
+    },
+}
 
 def speak_init():
     engine = pyttsx3.init()
@@ -32,6 +49,16 @@ def speak(engine, text):
 def db_connect():
     return sqlite3.connect(DB_PATH)
 
+def ensure_column_exists(table, column, definition):
+    con = db_connect()
+    cur = con.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = [row[1] for row in cur.fetchall()]
+    if column not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    con.commit()
+    con.close()
+
 def db_init():
     con = db_connect()
     cur = con.cursor()
@@ -40,8 +67,10 @@ def db_init():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT UNIQUE,
             name_pl TEXT NOT NULL,
+            name_en TEXT,
             category TEXT,
             description_pl TEXT,
+            description_en TEXT,
             priority INTEGER DEFAULT 0
         )
     """)
@@ -55,19 +84,23 @@ def db_init():
     """)
     con.commit()
     con.close()
+    ensure_column_exists("signs", "name_en", "TEXT")
+    ensure_column_exists("signs", "description_en", "TEXT")
 
-def db_upsert_sign(code, name_pl, category, description_pl, priority=0):
+def db_upsert_sign(code, name_pl, name_en, category, description_pl, description_en, priority=0):
     con = db_connect()
     cur = con.cursor()
     cur.execute("""
-        INSERT INTO signs(code, name_pl, category, description_pl, priority)
-        VALUES(?,?,?,?,?)
+        INSERT INTO signs(code, name_pl, name_en, category, description_pl, description_en, priority)
+        VALUES(?,?,?,?,?,?,?)
         ON CONFLICT(code) DO UPDATE SET
             name_pl=excluded.name_pl,
+            name_en=excluded.name_en,
             category=excluded.category,
             description_pl=excluded.description_pl,
+            description_en=excluded.description_en,
             priority=excluded.priority
-    """, (code, name_pl, category, description_pl, int(priority)))
+    """, (code, name_pl, name_en, category, description_pl, description_en, int(priority)))
     con.commit()
     con.close()
 
@@ -84,10 +117,41 @@ def db_upsert_alias(alias, code):
     con.close()
 
 def seed_signs():
-    def add(code, name, cat, desc, pr=0, aliases=None):
-        db_upsert_sign(code, name, cat, desc, pr)
+    translations_en = {
+        "B-20": {"name": "STOP", "desc": "Stop and yield to other traffic."},
+        "A-7": {"name": "Yield", "desc": "Give way to other vehicles."},
+        "D-1": {"name": "Priority road", "desc": "You have right of way on this road."},
+        "D-2": {"name": "End of priority road", "desc": "Priority ends ahead."},
+        "B-33": {"name": "Speed limit", "desc": "Do not exceed the posted speed."},
+        "B-34": {"name": "End of speed limit", "desc": "Speed restriction lifted."},
+        "B-35": {"name": "No parking", "desc": "Parking is not allowed."},
+        "B-36": {"name": "No stopping", "desc": "Stopping is prohibited."},
+        "B-1": {"name": "No vehicles", "desc": "Road closed to vehicles in both directions."},
+        "B-2": {"name": "No entry", "desc": "Do not enter."},
+        "B-3": {"name": "No motor vehicles", "desc": "Motor vehicles are prohibited."},
+        "B-9": {"name": "No bicycles", "desc": "Bicycles are prohibited."},
+        "B-21": {"name": "No left turn", "desc": "Left turns are prohibited."},
+        "B-22": {"name": "No right turn", "desc": "Right turns are prohibited."},
+        "B-23": {"name": "No U-turn", "desc": "U-turns are prohibited."},
+        "B-25": {"name": "No overtaking", "desc": "Overtaking is not allowed."},
+        "C-12": {"name": "Roundabout", "desc": "Traffic circulates around the island."},
+        "A-16": {"name": "Pedestrian crossing", "desc": "Pedestrian crossing ahead."},
+        "A-14": {"name": "Road works", "desc": "Road works ahead."},
+        "A-15": {"name": "Slippery road", "desc": "Road surface may be slippery."},
+        "A-18b": {"name": "Wild animals", "desc": "Beware of wild animals crossing."},
+        "D-6": {"name": "Pedestrian crossing", "desc": "Area designated for pedestrians to cross."},
+        "D-23": {"name": "Fuel station", "desc": "Fuel station available ahead."},
+        "D-26": {"name": "First aid", "desc": "First aid point available."}
+    }
+
+    def add(code, name_pl, cat, desc_pl, pr=0, aliases=None, name_en=None, desc_en=None):
+        en_name = name_en or translations_en.get(code, {}).get("name") or name_pl
+        en_desc = desc_en or translations_en.get(code, {}).get("desc") or desc_pl
+        db_upsert_sign(code, name_pl, en_name, cat, desc_pl, en_desc, pr)
         db_upsert_alias(code.lower(), code)
-        db_upsert_alias(name.lower(), code)
+        db_upsert_alias(name_pl.lower(), code)
+        if en_name and en_name.lower() != name_pl.lower():
+            db_upsert_alias(en_name.lower(), code)
         if aliases:
             for a in aliases:
                 db_upsert_alias(str(a).strip().lower(), code)
@@ -196,7 +260,7 @@ def db_lookup(label):
     con = db_connect()
     cur = con.cursor()
     cur.execute("""
-        SELECT s.code, s.name_pl, s.category, s.description_pl, s.priority
+        SELECT s.code, s.name_pl, s.name_en, s.category, s.description_pl, s.description_en, s.priority
         FROM aliases a
         JOIN signs s ON s.code = a.code
         WHERE a.alias = ?
@@ -205,16 +269,24 @@ def db_lookup(label):
     row = cur.fetchone()
     if row is None:
         cur.execute("""
-            SELECT code, name_pl, category, description_pl, priority
+            SELECT code, name_pl, name_en, category, description_pl, description_en, priority
             FROM signs
-            WHERE lower(code)=? OR lower(name_pl)=?
+            WHERE lower(code)=? OR lower(name_pl)=? OR lower(name_en)=?
             LIMIT 1
-        """, (key, key))
+        """, (key, key, key))
         row = cur.fetchone()
     con.close()
     if row is None:
         return None
-    return {"code": row[0], "name": row[1], "category": row[2], "desc": row[3], "priority": int(row[4] or 0)}
+    return {
+        "code": row[0],
+        "name_pl": row[1],
+        "name_en": row[2],
+        "category": row[3],
+        "desc_pl": row[4],
+        "desc_en": row[5],
+        "priority": int(row[6] or 0),
+    }
 
 def put_label(img, text, x, y):
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -313,13 +385,23 @@ def detect_yolo(model, img):
         r.append({"label": str(label).strip(), "conf": float(c), "bbox": (int(x1), int(y1), int(x2), int(y2))})
     return r
 
-def enrich(dets):
+def enrich(dets, language):
     enriched = []
     for d in dets:
         info = db_lookup(d["label"])
         if info is None:
-            info = {"code": d["label"], "name": d["label"], "category": None, "desc": None, "priority": 0}
-        enriched.append({**d, **info})
+            info = {
+                "code": d["label"],
+                "name_pl": d["label"],
+                "name_en": d["label"],
+                "desc_pl": None,
+                "desc_en": None,
+                "category": None,
+                "priority": 0,
+            }
+        name = info["name_pl"] if language == "pl" else (info["name_en"] or info["name_pl"])
+        desc = info["desc_pl"] if language == "pl" else (info["desc_en"] or info["desc_pl"])
+        enriched.append({**d, **info, "name": name, "desc": desc})
     enriched.sort(key=lambda x: (x.get("priority", 0), x.get("conf", 0.0)), reverse=True)
     return enriched
 
@@ -332,47 +414,129 @@ def draw(img, enriched):
         put_label(out, label, x1, y1)
     return out
 
+def detect_any(model, img, min_conf=0.0):
+    dets = []
+    if model is not None:
+        dets = detect_yolo(model, img)
+    else:
+        dets = detect_fallback(img)
+    return [d for d in dets if d.get("conf", 0.0) >= min_conf]
+
+def get_lang_strings(lang):
+    return LANG_STRINGS.get(lang, LANG_STRINGS["pl"])
+
+def print_detections(enriched, strings):
+    print("\n" + "#" * 40)
+    for d in enriched[:12]:
+        print(f'{strings["detected"]}: {d["name"]} | conf: {d["conf"]:.2f} | code: {d["code"]}')
+        if d.get("desc"):
+            print(f'{strings["desc"]}: {d["desc"]}')
+    print("#" * 40 + "\n")
+
+def handle_detections(enriched, engine, strings, last_code=None, verbose=False, notify_on_none=False):
+    if not enriched:
+        if notify_on_none and last_code is not None:
+            print(strings["none"])
+        return None if notify_on_none else last_code
+    top = enriched[0]
+    should_report = verbose or (top.get("code") != last_code)
+    if should_report:
+        print_detections(enriched, strings)
+    if top.get("code") != last_code:
+        msg = top.get("desc") or top.get("name") or ""
+        if msg:
+            speak(engine, msg)
+        last_code = top.get("code")
+    return last_code
+
+def run_on_image(image_path, model, engine, min_conf, language, strings):
+    img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if img is None:
+        print(f"BŁĄD: Nie widzę pliku '{image_path}'.")
+        return
+    dets = detect_any(model, img, min_conf=min_conf)
+    enriched = enrich(dets, language)
+    out = draw(img, enriched)
+    handle_detections(enriched, engine, strings, verbose=True, notify_on_none=True)
+    cv2.imshow("SignAI", out)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+def run_camera(camera_index, model, engine, frame_skip=1, min_conf=0.0, language="pl", strings=None):
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        print(f"BŁĄD: Nie mogę otworzyć kamery #{camera_index}.")
+        return
+    frame_skip = max(1, int(frame_skip))
+    frame_idx = 0
+    last_code = None
+    last_overlay = None
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("BŁĄD: Nie mogę odczytać klatki z kamery.")
+                break
+            overlay = last_overlay if last_overlay is not None else frame
+            if frame_idx % frame_skip == 0:
+                dets = detect_any(model, frame, min_conf=min_conf)
+                enriched = enrich(dets, language)
+                if enriched:
+                    overlay = draw(frame, enriched)
+                    last_overlay = overlay
+                else:
+                    last_overlay = None
+                    overlay = frame
+                last_code = handle_detections(
+                    enriched,
+                    engine,
+                    strings,
+                    last_code=last_code,
+                    verbose=False,
+                    notify_on_none=True,
+                )
+            cv2.imshow("SignAI", overlay)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                break
+            frame_idx += 1
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=LANG_STRINGS["pl"]["app_desc"])
+    parser.add_argument("--image", "-i", help="Ścieżka do obrazu (jeśli pomijasz, użyta będzie kamera).")
+    parser.add_argument("--camera", "-c", type=int, default=0, help="Numer kamery (domyślnie 0).")
+    parser.add_argument("--frame-skip", type=int, default=2, help="Analizuj co N-tą klatkę kamery (domyślnie 2).")
+    parser.add_argument("--min-conf", type=float, default=MIN_CONF_DEFAULT, help="Minimalna pewność wykrycia (0-1).")
+    parser.add_argument("--lang", choices=["pl", "en"], default="pl", help="Język komunikatów i opisów (pl/en).")
+    return parser.parse_args()
+
 def main():
+    args = parse_args()
     db_init()
     seed_signs()
     engine = speak_init()
     model = load_model_or_none()
 
-    image_path = "znak.png"
-    import sys
-    if len(sys.argv) > 1:
-        image_path = sys.argv[1]
+    min_conf = max(0.0, min(1.0, float(args.min_conf)))
+    language = args.lang or "pl"
+    strings = get_lang_strings(language)
 
-    img = cv2.imread(image_path, cv2.IMREAD_COLOR)
-    if img is None:
-        print(f"BŁĄD: Nie widzę pliku '{image_path}'.")
+    if args.image:
+        run_on_image(args.image, model, engine, min_conf=min_conf, language=language, strings=strings)
         return
 
-    if model is not None:
-        dets = detect_yolo(model, img)
-    else:
-        dets = detect_fallback(img)
-
-    enriched = enrich(dets)
-    out = draw(img, enriched)
-
-    if enriched:
-        print("\n" + "#" * 40)
-        for d in enriched[:12]:
-            print(f'WYKRYTO: {d["name"]} | pewność: {d["conf"]:.2f} | kod: {d["code"]}')
-            if d.get("desc"):
-                print(f'OPIS: {d["desc"]}')
-        print("#" * 40 + "\n")
-        top = enriched[0]
-        msg = top.get("desc") or top.get("name") or ""
-        if msg:
-            speak(engine, msg)
-    else:
-        print("Nie wykryto znaku.")
-
-    cv2.imshow("SignAI", out)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    run_camera(
+        args.camera,
+        model,
+        engine,
+        frame_skip=args.frame_skip,
+        min_conf=min_conf,
+        language=language,
+        strings=strings,
+    )
 
 if __name__ == "__main__":
     main()
